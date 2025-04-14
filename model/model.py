@@ -140,23 +140,62 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 
 
 class Attention(nn.Module):
+    """
+    多头注意力机制（Multi-Head Attention）实现
+
+    注意力机制是Transformer架构的核心组件，允许模型关注输入序列中的不同部分。
+    本实现支持：
+    1. 分组查询注意力（Grouped-Query Attention, GQA）：允许Q头数量多于KV头数量
+    2. 旋转位置编码（Rotary Position Embedding, RoPE）：通过复数旋转编码位置信息
+    3. 注意力掩码：确保模型只能看到当前及之前的token（因果关系）
+    4. KV缓存：用于加速自回归生成过程
+    5. Flash Attention：当PyTorch版本支持时，使用更高效的注意力计算
+
+    计算流程：
+    1. 将输入通过线性层投影为查询(Q)、键(K)和值(V)
+    2. 应用旋转位置编码
+    3. 计算注意力分数：Q与K的点积，并进行缩放
+    4. 应用因果掩码确保自回归属性
+    5. 对分数进行softmax归一化
+    6. 将注意力权重与V相乘得到输出
+    7. 通过输出投影层转换回原始维度
+    """
     def __init__(self, args: LMConfig):
+        """
+        初始化注意力层
+
+        参数:
+            args: 模型配置参数
+        """
         super().__init__()
+        # 确定KV头的数量，如果未指定则与Q头数量相同
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
+        # 确保Q头数量是KV头数量的整数倍，这是GQA的要求
         assert args.n_heads % self.n_kv_heads == 0
+        # 查询(Q)头的数量
         self.n_local_heads = args.n_heads
+        # 键值(KV)头的数量
         self.n_local_kv_heads = self.n_kv_heads
+        # 每个KV头对应的Q头数量，用于GQA中的头部复制
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        # 每个注意力头的维度
         self.head_dim = args.dim // args.n_heads
+        # Q、K、V的线性投影层
         self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
+        # 输出投影层，将多头注意力的结果映射回模型维度
         self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        # 注意力权重的dropout
         self.attn_dropout = nn.Dropout(args.dropout)
+        # 残差连接的dropout
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
+        # 检测是否可以使用Flash Attention（需要PyTorch >= 2.0）
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and args.flash_attn
         # print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+        # 创建因果掩码（上三角矩阵，对角线以上为-inf）
+        # 这确保了每个位置只能关注自身及之前的位置，实现自回归属性
         mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
         mask = torch.triu(mask, diagonal=1)
         self.register_buffer("mask", mask, persistent=False)
@@ -166,41 +205,78 @@ class Attention(nn.Module):
                 pos_cis: torch.Tensor,
                 past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
                 use_cache=False):
+        """
+        注意力层的前向传播
+
+        参数:
+            x: 输入张量，形状为 [batch_size, seq_len, hidden_dim]
+            pos_cis: 预计算的旋转位置编码
+            past_key_value: 可选的KV缓存，用于加速自回归生成
+            use_cache: 是否使用并返回KV缓存
+
+        返回:
+            output: 注意力层的输出，形状为 [batch_size, seq_len, hidden_dim]
+            past_kv: 更新后的KV缓存（如果use_cache=True）
+        """
+        # 获取输入张量的形状信息
         bsz, seq_len, _ = x.shape
+
+        # 1. 线性投影：将输入投影到查询(Q)、键(K)和值(V)空间
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+
+        # 2. 重塑张量以便多头处理
+        # 从 [batch_size, seq_len, heads*head_dim] 变为 [batch_size, seq_len, heads, head_dim]
         xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
 
+        # 3. 应用旋转位置编码(RoPE)到查询和键
         xq, xk = apply_rotary_emb(xq, xk, pos_cis)
-        # kv_cache实现
+
+        # 4. KV缓存处理：如果有历史KV，则与当前KV拼接
+        # 这在生成时很有用，避免重复计算已处理token的KV值
         if past_key_value is not None:
-            xk = torch.cat([past_key_value[0], xk], dim=1)
-            xv = torch.cat([past_key_value[1], xv], dim=1)
+            xk = torch.cat([past_key_value[0], xk], dim=1)  # 拼接历史K和当前K
+            xv = torch.cat([past_key_value[1], xv], dim=1)  # 拼接历史V和当前V
+        # 如果需要缓存，则保存当前KV用于下一步
         past_kv = (xk, xv) if use_cache else None
 
+        # 5. 张量变换准备计算注意力
+        # - 转置维度，使头维度在前，便于批量计算
+        # - 对KV进行重复，实现分组查询注意力(GQA)
         xq, xk, xv = (
-            xq.transpose(1, 2),
-            repeat_kv(xk, self.n_rep).transpose(1, 2),
+            xq.transpose(1, 2),  # [batch_size, n_heads, seq_len, head_dim]
+            repeat_kv(xk, self.n_rep).transpose(1, 2),  # 重复KV头以匹配Q头数量
             repeat_kv(xv, self.n_rep).transpose(1, 2)
         )
-        if self.flash and seq_len != 1:
+
+        # 6. 注意力计算
+        if self.flash and seq_len != 1:  # 使用Flash Attention（如果可用且序列长度>1）
             dropout_p = self.dropout if self.training else 0.0
             output = F.scaled_dot_product_attention(
                 xq, xk, xv,
-                attn_mask=None,
+                attn_mask=None,  # Flash Attention内部处理因果掩码
                 dropout_p=dropout_p,
-                is_causal=True
+                is_causal=True  # 指示使用因果掩码
             )
-        else:
+        else:  # 使用传统注意力计算
+            # 计算注意力分数：Q和K的矩阵乘法，然后除以缩放因子
             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            # 应用因果掩码，确保只关注当前及之前的token
             scores += self.mask[:, :, :seq_len, :seq_len]
+            # 对分数进行softmax归一化，得到注意力权重
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            # 应用dropout
             scores = self.attn_dropout(scores)
+            # 将注意力权重与V相乘得到加权值
             output = scores @ xv
 
+        # 7. 重塑输出并通过输出投影层
+        # 转置回原始维度顺序并合并多头结果
         output = output.transpose(1, 2).reshape(bsz, seq_len, -1)
+        # 通过输出投影层并应用dropout
         output = self.resid_dropout(self.wo(output))
+
         return output, past_kv
 
 
