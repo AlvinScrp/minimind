@@ -281,18 +281,66 @@ class Attention(nn.Module):
 
 
 class FeedForward(nn.Module):
+    """
+    前馈神经网络（Feed Forward Network, FFN）实现
+
+    在Transformer架构中，FFN是注意力层之后的关键组件，用于增强模型的表达能力。
+    本实现采用SwiGLU激活函数变体，相比传统FFN有更好的性能：
+
+    传统FFN: FFN(x) = W₂·ReLU(W₁·x)
+    SwiGLU: FFN(x) = W₂·(SiLU(W₁·x) * W₃·x)
+
+    其中SiLU(x) = x·sigmoid(x)，也称为Swish激活函数
+
+    这种设计有以下优点：
+    1. 门控机制：W₃·x作为门控信号调节信息流
+    2. 更平滑的激活函数：SiLU比ReLU更平滑，有利于优化
+    3. 更强的表达能力：双路径设计增强了网络的表达能力
+    """
     def __init__(self, config: LMConfig):
+        """
+        初始化前馈网络层
+
+        参数:
+            config: 模型配置参数
+        """
         super().__init__()
+        # 如果未指定隐藏层维度，则根据模型维度计算
         if config.hidden_dim is None:
+            # 首先设置为模型维度的4倍
             hidden_dim = 4 * config.dim
+            # 然后取2/3，这是SwiGLU变体的常用设置
             hidden_dim = int(2 * hidden_dim / 3)
+            # 将隐藏维度调整为multiple_of的倍数，有助于硬件加速
             config.hidden_dim = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
+
+        # 第一个投影层：将输入从模型维度映射到隐藏维度
         self.w1 = nn.Linear(config.dim, config.hidden_dim, bias=False)
+        # 第二个投影层：将激活后的结果映射回模型维度
         self.w2 = nn.Linear(config.hidden_dim, config.dim, bias=False)
+        # 第三个投影层：用于门控机制，与w1共同作用
         self.w3 = nn.Linear(config.dim, config.hidden_dim, bias=False)
+        # dropout层，用于正则化
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
+        """
+        前馈网络的前向传播
+
+        实现公式: FFN(x) = dropout(W₂·(SiLU(W₁·x) * W₃·x))
+
+        参数:
+            x: 输入张量，形状为 [batch_size, seq_len, hidden_dim]
+
+        返回:
+            经过前馈网络处理后的张量，形状与输入相同
+        """
+        # SwiGLU激活函数变体：
+        # 1. 计算W₁·x并应用SiLU激活函数
+        # 2. 计算W₃·x作为门控信号
+        # 3. 将两者相乘
+        # 4. 通过W₂投影回原始维度
+        # 5. 应用dropout
         return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 
