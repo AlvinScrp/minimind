@@ -51,38 +51,91 @@ class RMSNorm(torch.nn.Module):
 
 
 def precompute_pos_cis(dim: int, end: int = int(32 * 1024), theta: float = 1e6):
+    """
+    预计算旋转位置编码（Rotary Position Embeddings, RoPE）所需的复数值
+
+    参数:
+        dim: 隐藏维度大小
+        end: 最大序列长度，默认为32K
+        theta: RoPE中的缩放因子，影响位置编码的频率
+
+    返回:
+        pos_cis: 预计算好的复数形式的位置编码，形状为[end, dim//2]
+    """
+    # 计算不同频率的逆频率项
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    # 生成位置索引
     t = torch.arange(end, device=freqs.device)  # type: ignore
+    # 计算外积得到每个位置对应的每个频率
     freqs = torch.outer(t, freqs).float()  # type: ignore
+    # 使用欧拉公式 e^(i*θ) = cos(θ) + i*sin(θ) 生成复数
+    # 幅值为1，相位为freqs的复数值
     pos_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return pos_cis
 
 
 def apply_rotary_emb(xq, xk, pos_cis):
+    """
+    将旋转位置编码应用到查询(Q)和键(K)张量上
+
+    参数:
+        xq: 查询张量, 形状为[batch_size, seq_len, n_heads, head_dim]
+        xk: 键张量, 形状为[batch_size, seq_len, n_kv_heads, head_dim]
+        pos_cis: 预计算的位置编码复数
+
+    返回:
+        应用位置编码后的查询和键张量
+    """
     def unite_shape(pos_cis, x):
+        """
+        调整pos_cis的形状使其与输入张量x兼容，便于广播计算
+        """
         ndim = x.ndim
         assert 0 <= 1 < ndim
         assert pos_cis.shape == (x.shape[1], x.shape[-1])
+        # 创建一个新形状，只保留序列长度和特征维度，其余维度设为1
         shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
         return pos_cis.view(*shape)
 
+    # 将Q和K重塑并转换为复数形式
+    # 将最后一个维度每两个相邻元素视为一个复数的实部和虚部
     xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
     xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+
+    # 调整pos_cis的形状以便与输入张量兼容
     pos_cis = unite_shape(pos_cis, xq_)
+
+    # 应用旋转操作：在复数域中，乘以pos_cis等同于旋转
     xq_out = torch.view_as_real(xq_ * pos_cis).flatten(3)
     xk_out = torch.view_as_real(xk_ * pos_cis).flatten(3)
+
+    # 转换回输入张量的原始数据类型
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """torch.repeat_interleave(x, dim=2, repeats=n_rep)"""
+    """
+    实现键值张量的重复操作，用于注意力机制中的多头处理
+
+    功能等同于torch.repeat_interleave(x, dim=2, repeats=n_rep)
+
+    用于将KV头扩展至与Q头数量匹配（当KV头少于Q头时）
+
+    参数:
+        x: 输入张量，形状为[batch_size, seq_len, n_kv_heads, head_dim]
+        n_rep: 每个KV头重复的次数
+
+    返回:
+        重复后的张量，形状为[batch_size, seq_len, n_kv_heads*n_rep, head_dim]
+    """
     bs, slen, n_kv_heads, head_dim = x.shape
     if n_rep == 1:
         return x
+    # 在第三维插入新维度，然后扩展，最后重塑回原来的维度结构
     return (
-        x[:, :, :, None, :]
-        .expand(bs, slen, n_kv_heads, n_rep, head_dim)
-        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
+        x[:, :, :, None, :]  # 插入新维度: [bs, slen, n_kv_heads, 1, head_dim]
+        .expand(bs, slen, n_kv_heads, n_rep, head_dim)  # 扩展维度: [bs, slen, n_kv_heads, n_rep, head_dim]
+        .reshape(bs, slen, n_kv_heads * n_rep, head_dim)  # 重塑: [bs, slen, n_kv_heads*n_rep, head_dim]
     )
 
 
