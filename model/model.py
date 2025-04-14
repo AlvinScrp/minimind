@@ -528,21 +528,61 @@ class MiniMindBlock(nn.Module):
 
 
 class MiniMindLM(PreTrainedModel):
+    """
+    MiniMind语言模型主类
+
+    这是基于Transformer架构的语言模型实现，结合了多种现代技术：
+    1. 预归一化（Pre-Normalization）：在每个子层前而非后应用归一化
+    2. 旋转位置编码（RoPE）：使用复数旋转来编码位置信息
+    3. 参数共享：输入嵌入和输出层权重共享
+    4. 混合专家模型（MoE）：可选的稀疏前馈网络实现
+
+    模型整体结构：
+    1. 词元嵌入层：将输入token ID转换为向量表示
+    2. 多层Transformer块：每层包含自注意力和前馈网络
+    3. 最终归一化层：对最后的隐藏状态进行归一化
+    4. 输出层：将隐藏状态映射为词汇表大小的logits
+    """
     config_class = LMConfig
 
     def __init__(self, params: LMConfig = None):
+        """
+        初始化MiniMind语言模型
+
+        参数:
+            params: 模型配置参数，包含维度、层数、头数等超参数
+        """
+        # 如果未提供配置，则使用默认配置
         self.params = params or LMConfig()
         super().__init__(self.params)
+
+        # 设置基本参数
         self.vocab_size, self.n_layers = params.vocab_size, params.n_layers
+
+        # 词元嵌入层：将token ID映射为向量表示
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
+
+        # Dropout层：用于正则化，防止过拟合
         self.dropout = nn.Dropout(params.dropout)
+
+        # Transformer层：构建n_layers个MiniMindBlock
         self.layers = nn.ModuleList([MiniMindBlock(l, params) for l in range(self.n_layers)])
+
+        # 最终归一化层：对最后的隐藏状态进行归一化
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
+
+        # 输出层：将隐藏状态映射为词汇表大小的logits
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
+
+        # 参数共享：输入嵌入和输出层权重共享，减少参数量并提高性能
         self.tok_embeddings.weight = self.output.weight
+
+        # 预计算位置编码：用于旋转位置编码(RoPE)
         self.register_buffer("pos_cis",
                              precompute_pos_cis(dim=params.dim // params.n_heads, theta=params.rope_theta),
                              persistent=False)
+
+        # 输出容器：用于存储和返回模型的各种输出
         self.OUT = CausalLMOutputWithPast()
 
     def forward(self,
@@ -551,10 +591,36 @@ class MiniMindLM(PreTrainedModel):
                 use_cache: bool = False,
                 logits_to_keep: Union[int, torch.Tensor] = 0,
                 **args):
+        """
+        模型前向传播函数
+
+        参数:
+            input_ids: 输入的token ID，形状为[batch_size, seq_len]
+            past_key_values: 可选的KV缓存，用于加速自回归生成
+            use_cache: 是否使用并返回KV缓存
+            logits_to_keep: 控制只计算部分位置的logits，可以是整数或张量
+            **args: 其他参数，如start_pos（用于RoPE计算的起始位置）
+
+        返回:
+            CausalLMOutputWithPast对象，包含:
+            - logits: 预测的下一个token概率分布
+            - past_key_values: 更新后的KV缓存
+            - last_hidden_state: 最后一层的隐藏状态
+            - aux_loss: MoE模型的辅助损失（如果使用）
+        """
+        # 初始化KV缓存，如果未提供则为每层创建None
         past_key_values = past_key_values or [None] * len(self.layers)
+
+        # 获取起始位置，用于RoPE计算，默认为0
         start_pos = args.get('start_pos', 0)
+
+        # 1. 词元嵌入：将输入token ID转换为向量表示并应用dropout
         h = self.dropout(self.tok_embeddings(input_ids))
+
+        # 2. 获取当前序列对应的位置编码
         pos_cis = self.pos_cis[start_pos:start_pos + input_ids.size(1)]
+
+        # 3. 依次通过每个Transformer层
         past_kvs = []
         for l, layer in enumerate(self.layers):
             h, past_kv = layer(
@@ -564,66 +630,144 @@ class MiniMindLM(PreTrainedModel):
             )
             past_kvs.append(past_kv)
 
+        # 4. 确定需要计算logits的位置索引
+        # 如果logits_to_keep是整数，则只保留最后logits_to_keep个位置
+        # 否则使用提供的张量作为索引
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+
+        # 5. 计算输出logits：先归一化，然后通过输出层
         logits = self.output(self.norm(h)[:, slice_indices, :])
+
+        # 6. 计算MoE辅助损失（如果使用MoE）
         aux_loss = sum(l.feed_forward.aux_loss for l in self.layers if isinstance(l.feed_forward, MOEFeedForward))
-        self.OUT.__setitem__('last_hidden_state', h)
-        self.OUT.__setitem__('logits', logits)
-        self.OUT.__setitem__('aux_loss', aux_loss)
-        self.OUT.__setitem__('past_key_values', past_kvs)
+
+        # 7. 设置输出对象的各个字段
+        self.OUT.__setitem__('last_hidden_state', h)  # 最后的隐藏状态
+        self.OUT.__setitem__('logits', logits)  # 预测的logits
+        self.OUT.__setitem__('aux_loss', aux_loss)  # MoE辅助损失
+        self.OUT.__setitem__('past_key_values', past_kvs)  # KV缓存
+
         return self.OUT
 
     @torch.inference_mode()
     def generate(self, input_ids, eos_token_id=2, max_new_tokens=1024, temperature=0.75, top_p=0.90,
                  stream=False, rp=1., use_cache=True, pad_token_id=0, num_return_sequences=1, **args):
-        # 流式生成
+        """
+        文本生成函数
+
+        参数:
+            input_ids: 输入的token ID，形状为[batch_size, seq_len]
+            eos_token_id: 结束符token的ID，默认为2
+            max_new_tokens: 最大生成的新token数量，默认为1024
+            temperature: 温度参数，控制生成的随机性，越高越随机，默认为0.75
+            top_p: 核采样参数，控制采样的token范围，默认为0.90
+            stream: 是否使用流式生成，默认为False
+            rp: 重复惩罚因子，降低已出现token的概率，默认为1.0
+            use_cache: 是否使用KV缓存加速生成，默认为True
+            pad_token_id: 填充token的ID，默认为0
+            num_return_sequences: 每个输入生成的序列数量，默认为1
+            **args: 其他参数
+
+        返回:
+            生成的token序列，形状为[batch_size*num_return_sequences, seq_len]
+        """
+        # 流式生成模式：逐token生成并返回生成器
         if stream:
             return self._stream(input_ids, eos_token_id, max_new_tokens, temperature, top_p, rp, use_cache, **args)
 
-        # 直接生成
+        # 直接生成模式：一次性返回所有生成结果
         generated = []
         for i in range(input_ids.size(0)):
+            # 移除每个输入序列中的填充token
             non_pad = input_ids[i][input_ids[i] != pad_token_id].unsqueeze(0)
+            # 为每个输入生成num_return_sequences个不同序列
             for _ in range(num_return_sequences):
+                # 使用流式生成函数获取生成结果
                 out = self._stream(non_pad, eos_token_id, max_new_tokens, temperature, top_p, rp, use_cache, **args)
+                # 收集生成的token
                 tokens_list = [tokens[:, -1:] for tokens in out]
+                # 将生成的token拼接起来
                 gen = torch.cat(tokens_list, dim=-1) if tokens_list else non_pad
+                # 将输入和生成的token拼接成完整序列
                 full_sequence = torch.cat([non_pad, gen], dim=-1)
                 generated.append(full_sequence)
 
+        # 找出所有生成序列中的最大长度
         max_length = max(seq.size(1) for seq in generated)
+        # 将所有序列填充到相同长度
         generated = [
             torch.cat(
                 [seq, torch.full((1, max_length - seq.size(1)), pad_token_id, dtype=seq.dtype, device=seq.device)],
                 dim=-1)
             for seq in generated
         ]
+        # 将所有序列拼接成一个批次
         output = torch.cat(generated, dim=0)
+        # 重塑为[batch_size*num_return_sequences, seq_len]形状
         res = output.view(input_ids.size(0) * num_return_sequences, -1)
         return res
 
     def _stream(self, input_ids, eos_token_id, max_new_tokens, temperature, top_p, rp, use_cache, **args):
+        """
+        流式生成函数，逐token生成并返回生成器
+
+        参数:
+            input_ids: 输入的token ID
+            eos_token_id: 结束符token的ID
+            max_new_tokens: 最大生成的新token数量
+            temperature: 温度参数，控制随机性
+            top_p: 核采样参数
+            rp: 重复惩罚因子
+            use_cache: 是否使用KV缓存
+            **args: 其他参数
+
+        返回:
+            生成器，每次产出当前已生成的token序列
+        """
+        # 记录起始位置、是否首次推理和KV缓存
         start, first_seq, past_kvs = input_ids.shape[1], True, None
+        # 循环生成，直到达到最大长度或生成结束符
         while input_ids.shape[1] < max_new_tokens - 1:
+            # 首次推理或不使用缓存时，处理整个序列
             if first_seq or not use_cache:
                 out, first_seq = self(input_ids, past_key_values=past_kvs, use_cache=use_cache, **args), False
+            # 后续推理且使用缓存时，只处理最新的token
             else:
                 out = self(input_ids[:, -1:], past_key_values=past_kvs, use_cache=use_cache,
                            start_pos=input_ids.shape[1] - 1, **args)
+            # 获取logits和更新后的KV缓存
             logits, past_kvs = out.logits[:, -1, :], out.past_key_values
+
+            # 重复惩罚：降低已出现token的概率
             logits[:, list(set(input_ids.tolist()[0]))] /= rp
+            # 应用温度缩放
             logits /= (temperature + 1e-9)
+
+            # 核采样(Top-p/nucleus sampling)：只保留概率最高的若干token，使其累积概率达到top_p
             if top_p is not None and top_p < 1.0:
+                # 对logits按降序排序
                 sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
+                # 计算softmax概率
                 sorted_probs = F.softmax(sorted_logits, dim=-1)
+                # 计算累积概率
                 cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+                # 找出累积概率超过top_p的位置
                 sorted_indices_to_remove = cumulative_probs > top_p
+                # 向右移动一位，保留第一个超过阈值的token
                 sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+                # 确保至少保留概率最高的token
                 sorted_indices_to_remove[:, 0] = False
+                # 将排序后的掩码映射回原始顺序
                 indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                # 将被过滤的token概率设为负无穷
                 logits[indices_to_remove] = -float('Inf')
+
+            # 根据处理后的logits进行多项式采样，选择下一个token
             input_ids_next = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+            # 将新token添加到序列中
             input_ids = torch.cat((input_ids, input_ids_next), dim=1)
+            # 产出当前已生成的序列
             yield input_ids[:, start:]
+            # 如果生成了结束符，则停止生成
             if input_ids_next.item() == eos_token_id:
                 break
