@@ -460,26 +460,69 @@ class MOEFeedForward(nn.Module):
 
 
 class MiniMindBlock(nn.Module):
+    """
+    MiniMind模型的基本构建块
+
+    这是Transformer架构的核心组件，每个块包含：
+    1. 多头自注意力机制（Multi-Head Self-Attention）
+    2. 前馈神经网络（Feed-Forward Network）
+
+    每个组件前都有一个层归一化（Layer Normalization），并使用残差连接（Residual Connection）
+    """
     def __init__(self, layer_id: int, config: LMConfig):
+        """
+        初始化MiniMind块
+
+        参数:
+            layer_id: 层的索引编号，用于区分不同层
+            config: 模型配置参数
+        """
         super().__init__()
+        # 注意力头数量
         self.n_heads = config.n_heads
+        # 模型隐藏维度
         self.dim = config.dim
+        # 每个注意力头的维度
         self.head_dim = config.dim // config.n_heads
+        # 注意力层
         self.attention = Attention(config)
 
+        # 记录层索引，可用于位置相关的特殊处理
         self.layer_id = layer_id
+        # 注意力层前的归一化
         self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        # 前馈网络前的归一化
         self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        # 前馈网络层，根据配置选择普通FFN或混合专家FFN(MoE)
         self.feed_forward = FeedForward(config) if not config.use_moe else MOEFeedForward(config)
 
     def forward(self, x, pos_cis, past_key_value=None, use_cache=False):
+        """
+        前向传播函数
+
+        参数:
+            x: 输入张量，形状为 [batch_size, seq_len, hidden_dim]
+            pos_cis: 旋转位置编码
+            past_key_value: 可选的KV缓存，用于加速自回归生成
+            use_cache: 是否使用并返回KV缓存
+
+        返回:
+            out: 经过处理后的输出张量
+            past_kv: 更新后的KV缓存（如果use_cache=True）
+        """
+        # 1. 注意力子层：先归一化，再计算注意力，最后应用残差连接
+        # 先对输入进行层归一化
         h_attn, past_kv = self.attention(
             self.attention_norm(x),
             pos_cis,
             past_key_value=past_key_value,
             use_cache=use_cache
         )
+        # 应用第一个残差连接: x + Attention(LayerNorm(x))
         h = x + h_attn
+
+        # 2. 前馈网络子层：先归一化，再通过前馈网络，最后应用残差连接
+        # 应用第二个残差连接: h + FFN(LayerNorm(h))
         out = h + self.feed_forward(self.ffn_norm(h))
         return out, past_kv
 
