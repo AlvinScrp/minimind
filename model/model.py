@@ -14,15 +14,39 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
 class RMSNorm(torch.nn.Module):
+    """
+    均方根层归一化（Root Mean Square Layer Normalization）
+    相比传统的 LayerNorm，RMSNorm 计算更简单，不需要减去均值，
+    只需要对均方根进行归一化，计算效率更高
+    """
     def __init__(self, dim: int, eps: float = 1e-6):
+        """
+        初始化 RMSNorm 层
+
+        参数:
+            dim: 需要归一化的特征维度
+            eps: 添加到分母中的小常数，防止除零错误
+        """
         super().__init__()
         self.eps = eps
+        # 可学习的缩放参数
         self.weight = nn.Parameter(torch.ones(dim))
 
     def _norm(self, x):
+        """
+        执行 RMS 归一化计算
+
+        计算公式: x / sqrt(mean(x^2) + eps)
+        """
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
+        """
+        前向传播函数
+
+        先将输入转为 float 类型进行归一化计算，然后再转回原始数据类型
+        最后乘以可学习的权重参数
+        """
         return self.weight * self._norm(x.float()).type_as(x)
 
 
