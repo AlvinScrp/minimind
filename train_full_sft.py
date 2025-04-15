@@ -134,6 +134,7 @@ def init_model(lm_config):
     # 根据是否使用MoE确定预训练模型路径
     moe_path = '_moe' if lm_config.use_moe else ''
     ckp = f'./out/pretrain_{lm_config.dim}{moe_path}.pth'
+    print(f"加载权重{ckp}")
     # 加载预训练模型权重
     state_dict = torch.load(ckp, map_location=args.device)
     # 将权重加载到模型中（strict=False允许部分权重不匹配）
