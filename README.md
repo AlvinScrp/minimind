@@ -91,7 +91,7 @@
 <details style="color:rgb(128,128,128)">
 <summary>Models List</summary>
 
-| 模型 (大小)                 | 推理占用 (约) | Release    | 
+| 模型 (大小)                 | 推理占用 (约) | Release    |
 |-------------------------|----------|------------|
 | MiniMind2-small (26M)   | 0.5 GB   | 2025.02.06 |
 | MiniMind2-MoE (145M)    | 1.0 GB   | 2025.02.06 |
@@ -120,7 +120,7 @@
 
 ### 👉**更新日志**
 
-<details close> 
+<details close>
 <summary> <b>2025-02-09 (newest 🎉🎉🎉)</b> </summary>
 
 - 迎来发布以来重大更新，Release MiniMind2 Series。
@@ -140,7 +140,7 @@
 
 
 
-<details close> 
+<details close>
 <summary> <b>2024-10-05</b> </summary>
 
 - 为MiniMind拓展了多模态能力之---视觉
@@ -150,7 +150,7 @@
 
 
 
-<details close> 
+<details close>
 <summary> <b>2024-09-27</b> </summary>
 
 - 09-27更新pretrain数据集的预处理方式，为了保证文本完整性，放弃预处理成.bin训练的形式（轻微牺牲训练速度）。
@@ -160,7 +160,7 @@
 </details>
 
 
-<details close> 
+<details close>
 <summary> <b>2024-09-17</b> </summary>
 
 - 更新minimind-v1-moe模型
@@ -179,7 +179,7 @@
 </details>
 
 
-<details close> 
+<details close>
 <summary> <b>2024-08-27</b> </summary>
 
 - 项目首次开源
@@ -219,6 +219,21 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ```bash
 git clone https://huggingface.co/jingyaogong/MiniMind2
+```
+
+---
+
+xy3修改版：加速克隆之后拉取
+
+```
+git clone https://hf-mirror.com/jingyaogong/MiniMind2
+cd MiniMind2
+git lfs pull
+```
+
+需要安装
+```
+sudo apt-get install git-lfs
 ```
 
 ### 3.命令行问答
@@ -450,11 +465,11 @@ quality（当然也还不算high，提升数据质量无止尽）。
 ```text
 {
   "chosen": [
-    {"content": "Q", "role": "user"}, 
+    {"content": "Q", "role": "user"},
     {"content": "good answer", "role": "assistant"}
-  ], 
+  ],
   "rejected": [
-    {"content": "Q", "role": "user"}, 
+    {"content": "Q", "role": "user"},
     {"content": "bad answer", "role": "assistant"}
   ]
 }
@@ -717,7 +732,7 @@ GPT-4这种闭源模型，由于无法获取其内部结构，因此只能面向
 `./dataset/sft_1024.jsonl`与`./dataset/sft_2048.jsonl` 均收集自qwen2.5-7/72B-Instruct大模型，可直接用于SFT以获取Qwen的部分行为。
 
 ```bash
-# 注意需要更改train_full_sft.py数据集路径，以及max_seq_len  
+# 注意需要更改train_full_sft.py数据集路径，以及max_seq_len
 torchrun --nproc_per_node 1 train_full_sft.py
 # or
 python train_full_sft.py
@@ -1254,12 +1269,12 @@ MiniMind模型本身预训练数据集小的可怜，也没有针对性的对测
     ```bash
     curl http://ip:port/v1/chat/completions \
       -H "Content-Type: application/json" \
-      -d '{ 
+      -d '{
         "model": "model-identifier",
-        "messages": [ 
+        "messages": [
           { "role": "user", "content": "世界上最高的山是什么？" }
-        ], 
-        "temperature": 0.7, 
+        ],
+        "temperature": 0.7,
         "max_tokens": 512,
         "stream": true
     }'
@@ -1310,7 +1325,7 @@ MiniMind模型本身预训练数据集小的可怜，也没有针对性的对测
 <a href="https://github.com/jingyaogong/minimind/issues/213">🔗以交互笔记本方式分解项目代码</a>
 
 
-<details close> 
+<details close>
 <summary> <b>参考链接 & 感谢以下优秀的论文或项目</b> </summary>
 
 - 排名不分任何先后顺序
