@@ -18,7 +18,7 @@ def init_model(args):
         moe_path = '_moe' if args.use_moe else ''
         modes = {0: 'pretrain', 1: 'full_sft', 2: 'rlhf', 3: 'reason', 4: 'grpo'}
         ckp = f'./{args.out_dir}/{modes[args.model_mode]}_{args.dim}{moe_path}.pth'
-
+        print(f"加载权重{ckp}")
         model = MiniMindLM(LMConfig(
             dim=args.dim,
             n_layers=args.n_layers,
