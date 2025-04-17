@@ -44,21 +44,39 @@ def logits_to_probs(logits, labels):
 
 # DPO损失函数实现
 def dpo_loss(ref_probs, probs, mask, beta):
-    seq_lengths = mask.sum(dim=1, keepdim=True)  # 获取每个样本的有效长度
-    ref_probs = (ref_probs * mask).sum(dim=1) / seq_lengths.squeeze()  # 归一化参考概率
-    probs = (probs * mask).sum(dim=1) / seq_lengths.squeeze()  # 归一化当前模型概率
+    # 1. mask.sum 得到每个样本的真实长度，用于后续归一化“序列级别的 log-prob”
+    seq_lengths = mask.sum(dim=1, keepdim=True)
 
-    batch_size = ref_probs.shape[0]
-    chosen_ref_probs = ref_probs[:batch_size // 2]  # 前一半是正样本
-    reject_ref_probs = ref_probs[batch_size // 2:]  # 后一半是负样本
-    chosen_probs = probs[:batch_size // 2]
-    reject_probs = probs[batch_size // 2:]
+    # 2. 按 token 累加 log-probs，再除以长度，得到每个序列的平均 log-prob
+    #    ref_probs 与 probs 应该是形状 [batch, seq_len] 的 log π_ref 和 log π_θ
+    ref_probs = (ref_probs * mask).sum(dim=1) / seq_lengths.squeeze()
+    probs     = (    probs * mask).sum(dim=1) / seq_lengths.squeeze()
 
-    pi_logratios = chosen_probs - reject_probs  # 当前模型的 log ratio
-    ref_logratios = chosen_ref_probs - reject_ref_probs  # 参考模型的 log ratio
-    logits = pi_logratios - ref_logratios  # 差值即为训练目标
-    loss = -F.logsigmoid(beta * logits)  # DPO损失函数核心公式
+    # 3.Batch 里的前一半是“更优”回答 y_w，后一半是“次优”回答 y_ℓ
+    batch_size           = ref_probs.shape[0]
+    chosen_ref_probs     = ref_probs[:batch_size // 2]   # log π_ref(y_w|x)
+    reject_ref_probs     = ref_probs[batch_size // 2:]   # log π_ref(y_ℓ|x)
+    chosen_probs         = probs    [:batch_size // 2]   # log π_θ(y_w|x)
+    reject_probs         = probs    [batch_size // 2:]   # log π_θ(y_ℓ|x)
+
+    # 4. 计算两个 log-ratio：
+    #    A = log π_θ(y_w) - log π_θ(y_ℓ)
+    #    B = log π_ref(y_w) - log π_ref(y_ℓ)
+    pi_logratios  = chosen_probs - reject_probs
+    ref_logratios = chosen_ref_probs - reject_ref_probs
+
+    # 5. DPO 核心：用 A – B 作为 sigmoid 的输入
+    #    logits = A - B = [log π_θ(y_w) - log π_ref(y_w)]
+    #                  - [log π_θ(y_ℓ) - log π_ref(y_ℓ)]
+    logits = pi_logratios - ref_logratios
+
+    # 6. 负对数 sigmoid，就是 -log σ(β·logits)
+    #    完全对应公式里的 -log σ(β (A–B))
+    loss = -F.logsigmoid(beta * logits)
+
+    # 7. 对全batch取平均
     return loss.mean()
+
 
 # 单个 epoch 的训练流程
 def train_epoch(epoch, wandb):
